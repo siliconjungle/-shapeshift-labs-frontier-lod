@@ -389,6 +389,29 @@ export function createLodWorkPlan(frame: FrontierLodFrame, options: FrontierLodW
   const lanes = frame.lanes;
   const computeCosts = frame.computeCosts;
   const items: FrontierLodWorkItem[] = [];
+  if (!hasLastRunMs && !includeHidden) {
+    for (let i = 0; i < itemIndexes.length; i++) {
+      if (!visible[i]) continue;
+      const interval = intervals[i];
+      if (!Number.isFinite(interval) || interval < 0) continue;
+      const levelId = levelIds[i];
+      const id = ids[i];
+      items[items.length] = {
+        id,
+        index: itemIndexes[i],
+        level: levels[i],
+        levelId,
+        lane: lanes[i] || 'lod',
+        key: id + ':' + levelId,
+        type: taskType,
+        units: Math.max(0, computeCosts[i]),
+        due: true,
+        reason: 'interval',
+        metadata
+      };
+    }
+    return { kind: 'frontier.lod.work-plan', version: 1, generation: frame.generation, nowMs, items };
+  }
   for (let i = 0; i < itemIndexes.length; i++) {
     const id = ids[i];
     const itemVisible = visible[i];
