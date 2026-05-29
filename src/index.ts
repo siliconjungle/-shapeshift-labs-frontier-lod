@@ -638,6 +638,9 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
     const sourceProfiles = this.state.profiles;
     const compiledProfiles = this.compiledProfiles;
     const singleCompiledProfile = compiledProfiles.length === 1 ? compiledProfiles[0] : undefined;
+    const viewportHeight = normalizedObserver.viewportHeight ?? DEFAULT_VIEWPORT_HEIGHT;
+    const coverageBase = (2 * focal) / Math.max(1, viewportHeight);
+    const coverageScale = coverageBase * coverageBase;
     const itemProfileIndexes = this.itemProfileIndexes;
     const xs = this.x;
     const ys = this.y;
@@ -665,7 +668,12 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
       const dz = zs[index] - (normalizedObserver.z ?? 0);
       const distanceSquared = dx * dx + dy * dy + dz * dz;
       const distance = Math.sqrt(distanceSquared);
-      const coverage = screenCoverage(radii[index], distance, focal, normalizedObserver.viewportHeight ?? DEFAULT_VIEWPORT_HEIGHT);
+      let coverage = 1;
+      if (distanceSquared > EPSILON * EPSILON) {
+        const radius = radii[index];
+        const rawCoverage = (radius * radius * coverageScale) / distanceSquared;
+        coverage = rawCoverage >= 1 ? 1 : rawCoverage <= 0 ? 0 : rawCoverage;
+      }
       const activeMode = mode ?? compiledProfile.mode;
       const score = significanceScore(distance, coverage, priorities[index], weights[index], activeMode);
       let levelIndex: number;
@@ -693,8 +701,12 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
     }
 
     if (budget && bucketHeads) {
-      let overBudget = isOverBudget(budget, visibleCount, totalRenderCost, totalComputeCost);
-      let budgetChanged = false;
+      const maxVisible = budget.maxVisible;
+      const maxRenderCost = budget.maxRenderCost;
+      const maxComputeCost = budget.maxComputeCost;
+      let overBudget = (maxVisible !== undefined && visibleCount > maxVisible) ||
+        (maxRenderCost !== undefined && totalRenderCost > maxRenderCost) ||
+        (maxComputeCost !== undefined && totalComputeCost > maxComputeCost);
       for (let bucket = 0; bucket < bucketHeads.length && overBudget; bucket++) {
         let cursor = bucketHeads[bucket];
         while (cursor !== -1 && overBudget) {
@@ -705,11 +717,22 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
           if (nextLevelIndex !== currentLevelIndex) {
             const wasVisible = visible[cursor];
             const nextVisible = nextLevelIndex !== NO_LEVEL && profile.visible[nextLevelIndex] === 1;
-            totalRenderCost += compactRenderCost(profile, nextLevelIndex) - compactRenderCost(profile, currentLevelIndex);
-            totalComputeCost += compactComputeCost(profile, nextLevelIndex) - compactComputeCost(profile, currentLevelIndex);
+            const currentRenderCost = currentLevelIndex >= 0 ? profile.renderCosts[currentLevelIndex] : 0;
+            const currentComputeCost = currentLevelIndex >= 0 ? profile.computeCosts[currentLevelIndex] : 0;
+            const nextRenderCost = nextLevelIndex >= 0 ? profile.renderCosts[nextLevelIndex] : 0;
+            const nextComputeCost = nextLevelIndex >= 0 ? profile.computeCosts[nextLevelIndex] : 0;
+            totalRenderCost += nextRenderCost - currentRenderCost;
+            totalComputeCost += nextComputeCost - currentComputeCost;
             if (wasVisible && !nextVisible) visibleCount--;
+            const currentCountKey = visible[cursor] ? (levelIds[cursor] || 'hidden') : 'hidden';
+            const nextLevelId = nextLevelIndex === NO_LEVEL ? 'hidden' : profile.levelIds[nextLevelIndex];
+            const nextCountKey = nextVisible ? nextLevelId : 'hidden';
+            const currentCount = (countsByLevel[currentCountKey] ?? 0) - 1;
+            if (currentCount > 0) countsByLevel[currentCountKey] = currentCount;
+            else delete countsByLevel[currentCountKey];
+            countsByLevel[nextCountKey] = (countsByLevel[nextCountKey] ?? 0) + 1;
             levels[cursor] = nextLevelIndex;
-            levelIds[cursor] = nextLevelIndex === NO_LEVEL ? 'hidden' : profile.levelIds[nextLevelIndex];
+            levelIds[cursor] = nextLevelId;
             visible[cursor] = nextVisible;
             renderCosts[cursor] = nextVisible ? profile.renderCosts[nextLevelIndex] : 0;
             computeCosts[cursor] = nextVisible ? profile.computeCosts[nextLevelIndex] : 0;
@@ -718,13 +741,13 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
             this.lastLevels[itemIndex] = nextLevelIndex;
             this.lastVisible[itemIndex] = nextVisible ? 1 : 0;
             changedIndexes[changedIndexes.length] = itemIndex;
-            budgetChanged = true;
-            overBudget = isOverBudget(budget, visibleCount, totalRenderCost, totalComputeCost);
+            overBudget = (maxVisible !== undefined && visibleCount > maxVisible) ||
+              (maxRenderCost !== undefined && totalRenderCost > maxRenderCost) ||
+              (maxComputeCost !== undefined && totalComputeCost > maxComputeCost);
           }
           cursor = this.bucketNext[cursor];
         }
       }
-      if (budgetChanged) rebuildCounts();
     }
 
     return {
@@ -790,21 +813,6 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
       return position;
     }
 
-    function rebuildCounts(): void {
-      for (const key of Object.keys(countsByLevel)) delete countsByLevel[key];
-      visibleCount = 0;
-      totalRenderCost = 0;
-      totalComputeCost = 0;
-      for (let i = 0; i < itemIndexes.length; i++) {
-        const levelId = visible[i] ? levelIds[i] : 'hidden';
-        countsByLevel[levelId] = (countsByLevel[levelId] ?? 0) + 1;
-        if (visible[i]) {
-          visibleCount++;
-          totalRenderCost += renderCosts[i];
-          totalComputeCost += computeCosts[i];
-        }
-      }
-    }
   }
 
   assignments(frame: FrontierLodFrame): FrontierLodAssignment[] {
@@ -844,12 +852,15 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
     const bucketHeads = buildBudgetBuckets ? new Int32Array(64) : undefined;
     if (bucketHeads) bucketHeads.fill(-1);
     if (buildBudgetBuckets && this.bucketNext.length < this.state.items.length) this.bucketNext = new Int32Array(this.state.items.length);
-    const focal = focalPixels(normalizedObserver);
+    const needsCoverage = mode !== 'distance';
+    const focal = needsCoverage ? focalPixels(normalizedObserver) : 0;
     const thisRef = this;
     const eyeX = normalizedObserver.x;
     const eyeY = normalizedObserver.y;
     const eyeZ = normalizedObserver.z ?? 0;
-    const viewportHeight = normalizedObserver.viewportHeight ?? DEFAULT_VIEWPORT_HEIGHT;
+    const viewportHeight = needsCoverage ? (normalizedObserver.viewportHeight ?? DEFAULT_VIEWPORT_HEIGHT) : DEFAULT_VIEWPORT_HEIGHT;
+    const coverageBase = needsCoverage ? (2 * focal) / Math.max(1, viewportHeight) : 0;
+    const coverageScale = coverageBase * coverageBase;
     const qualityScale = qualityBias * qualityBias;
     const itemCount = this.state.items.length;
     const singleProfile = this.compiledProfiles.length === 1 ? this.compiledProfiles[0] : undefined;
@@ -878,7 +889,16 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
       const distanceSquared = dx * dx + dy * dy + dz * dz;
       const distance = Math.sqrt(distanceSquared);
       const activeMode = mode ?? profile.mode;
-      const coverage = activeMode === 'distance' ? 0 : screenCoverage(radii[index], distance, focal, viewportHeight);
+      let coverage = 0;
+      if (activeMode !== 'distance') {
+        if (distanceSquared <= EPSILON * EPSILON) {
+          coverage = 1;
+        } else {
+          const radius = radii[index];
+          const rawCoverage = (radius * radius * coverageScale) / distanceSquared;
+          coverage = rawCoverage >= 1 ? 1 : rawCoverage <= 0 ? 0 : rawCoverage;
+        }
+      }
       const score = buildBudgetBuckets || activeMode !== 'distance'
         ? significanceScore(distance, coverage, priorities[index], weights[index], activeMode)
         : 0;
@@ -909,7 +929,12 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
     }
 
     if (budget && bucketHeads) {
-      let overBudget = isOverBudget(budget, frame.visibleCount, frame.totalRenderCost, frame.totalComputeCost);
+      const maxVisible = budget.maxVisible;
+      const maxRenderCost = budget.maxRenderCost;
+      const maxComputeCost = budget.maxComputeCost;
+      let overBudget = (maxVisible !== undefined && frame.visibleCount > maxVisible) ||
+        (maxRenderCost !== undefined && frame.totalRenderCost > maxRenderCost) ||
+        (maxComputeCost !== undefined && frame.totalComputeCost > maxComputeCost);
       for (let bucket = 0; bucket < bucketHeads.length && overBudget; bucket++) {
         let cursor = bucketHeads[bucket];
         while (cursor !== -1 && overBudget) {
@@ -919,15 +944,21 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
           if (next !== current) {
             const wasVisible = frame.visible[cursor] === 1;
             const nextVisible = next !== NO_LEVEL && profile.visible[next] === 1;
-            frame.totalRenderCost += compactRenderCost(profile, next) - compactRenderCost(profile, current);
-            frame.totalComputeCost += compactComputeCost(profile, next) - compactComputeCost(profile, current);
+            const currentRenderCost = current >= 0 ? profile.renderCosts[current] : 0;
+            const currentComputeCost = current >= 0 ? profile.computeCosts[current] : 0;
+            const nextRenderCost = next >= 0 ? profile.renderCosts[next] : 0;
+            const nextComputeCost = next >= 0 ? profile.computeCosts[next] : 0;
+            frame.totalRenderCost += nextRenderCost - currentRenderCost;
+            frame.totalComputeCost += nextComputeCost - currentComputeCost;
             if (wasVisible && !nextVisible) frame.visibleCount--;
             frame.levels[cursor] = next;
             frame.visible[cursor] = nextVisible ? 1 : 0;
             this.lastLevels[cursor] = next;
             this.lastVisible[cursor] = nextVisible ? 1 : 0;
             frame.changedIndexes[frame.changedIndexes.length] = cursor;
-            overBudget = isOverBudget(budget, frame.visibleCount, frame.totalRenderCost, frame.totalComputeCost);
+            overBudget = (maxVisible !== undefined && frame.visibleCount > maxVisible) ||
+              (maxRenderCost !== undefined && frame.totalRenderCost > maxRenderCost) ||
+              (maxComputeCost !== undefined && frame.totalComputeCost > maxComputeCost);
           }
           cursor = this.bucketNext[cursor];
         }
@@ -1278,6 +1309,7 @@ interface CompiledLodProfile {
   computeCosts: Float64Array;
   updateIntervalsMs: Float64Array;
   visible: Uint8Array;
+  nextCheaperLevels: Int16Array;
 }
 
 function ensureCompactFrame(target: FrontierLodCompactFrame | undefined, size: number): FrontierLodCompactFrame {
@@ -1334,6 +1366,7 @@ function compileProfile(profile: FrontierLodProfile): CompiledLodProfile {
   const computeCosts = new Float64Array(count);
   const updateIntervalsMs = new Float64Array(count);
   const visible = new Uint8Array(count);
+  const nextCheaperLevels = new Int16Array(count);
   for (let i = 0; i < count; i++) {
     const level = profile.levels[i];
     levelIds[i] = level.id;
@@ -1346,6 +1379,17 @@ function compileProfile(profile: FrontierLodProfile): CompiledLodProfile {
     updateIntervalsMs[i] = levelUpdateInterval(level);
     visible[i] = level.visible === false ? 0 : 1;
   }
+  for (let i = 0; i < count; i++) {
+    const currentCost = renderCosts[i] + computeCosts[i];
+    let nextLevel = i;
+    for (let candidate = i + 1; candidate < count; candidate++) {
+      if (visible[candidate] === 0 || renderCosts[candidate] + computeCosts[candidate] <= currentCost) {
+        nextLevel = candidate;
+        break;
+      }
+    }
+    nextCheaperLevels[i] = nextLevel;
+  }
   return {
     mode: profile.mode ?? 'distance',
     count,
@@ -1357,7 +1401,8 @@ function compileProfile(profile: FrontierLodProfile): CompiledLodProfile {
     renderCosts,
     computeCosts,
     updateIntervalsMs,
-    visible
+    visible,
+    nextCheaperLevels
   };
 }
 
@@ -1376,20 +1421,7 @@ function selectCompiledLevel(profile: CompiledLodProfile, distance: number, cove
 }
 
 function nextCheaperCompiledLevel(profile: CompiledLodProfile, levelIndex: number): number {
-  if (levelIndex < 0) return levelIndex;
-  const currentCost = compactRenderCost(profile, levelIndex) + compactComputeCost(profile, levelIndex);
-  for (let i = levelIndex + 1; i < profile.count; i++) {
-    if (profile.visible[i] === 0 || profile.renderCosts[i] + profile.computeCosts[i] <= currentCost) return i;
-  }
-  return levelIndex;
-}
-
-function compactRenderCost(profile: CompiledLodProfile, levelIndex: number): number {
-  return levelIndex >= 0 && levelIndex < profile.count ? profile.renderCosts[levelIndex] : 0;
-}
-
-function compactComputeCost(profile: CompiledLodProfile, levelIndex: number): number {
-  return levelIndex >= 0 && levelIndex < profile.count ? profile.computeCosts[levelIndex] : 0;
+  return levelIndex >= 0 && levelIndex < profile.count ? profile.nextCheaperLevels[levelIndex] : levelIndex;
 }
 
 function normalizeSnapshot(input: FrontierLodInput): FrontierLodSnapshot {
@@ -1543,19 +1575,6 @@ function selectLevel(
   return levels.length - 1;
 }
 
-function isOverBudget(budget: FrontierLodBudget, visibleCount: number, renderCost: number, computeCost: number): boolean {
-  return (budget.maxVisible !== undefined && visibleCount > budget.maxVisible) ||
-    (budget.maxRenderCost !== undefined && renderCost > budget.maxRenderCost) ||
-    (budget.maxComputeCost !== undefined && computeCost > budget.maxComputeCost);
-}
-
-function screenCoverage(radius: number, distance: number, focal: number, viewportHeight: number): number {
-  if (distance <= EPSILON) return 1;
-  const diameterPixels = (2 * radius * focal) / distance;
-  const normalized = diameterPixels / Math.max(1, viewportHeight);
-  return Math.max(0, Math.min(1, normalized * normalized));
-}
-
 function significanceScore(distance: number, coverage: number, priority: number, weight: number, mode: FrontierLodMode): number {
   if (mode === 'screen') return priority * weight * coverage;
   if (mode === 'priority') return priority * weight * (coverage + 1 / (distance + 1));
@@ -1570,8 +1589,9 @@ function focalPixels(observer: FrontierLodObserver): number {
 }
 
 function scoreBucket(score: number): number {
-  const normalized = score / (score + 1);
-  return Math.max(0, Math.min(63, Math.floor(normalized * 63)));
+  if (score <= 0) return 0;
+  const bucket = (score / (score + 1) * 63) | 0;
+  return bucket > 63 ? 63 : bucket;
 }
 
 function levelRenderCost(level: FrontierLodLevel): number {

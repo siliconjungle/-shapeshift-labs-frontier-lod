@@ -167,13 +167,13 @@ Latest local package benchmark on Node v26.1.0, darwin arm64, 100k items and 120
 
 | Fixture | Median | p95 |
 | --- | ---: | ---: |
-| `evaluate-bands-distance-100000` | 743.83 us | 844.67 us |
-| `evaluate-band-transitions-static-100000` | 603.79 us | 746.46 us |
-| `evaluate-multi-observer-distance-100000` | 1.56 ms | 1.76 ms |
-| `evaluate-compact-distance-100000` | 1.34 ms | 1.42 ms |
-| `evaluate-distance-100000` | 4.11 ms | 4.36 ms |
-| `evaluate-screen-100000` | 12.23 ms | 19.68 ms |
-| `evaluate-budget-100000` | 17.80 ms | 29.29 ms |
-| `materialize-frame-100000` | 777.42 us | 1.13 ms |
-| `work-plan-100000` | 5.06 ms | 9.45 ms |
-| `patch-128-positions-100000` | 44.21 us | 100.37 us |
+| `evaluate-bands-distance-100000` | 748.25 us | 840.58 us |
+| `evaluate-band-transitions-static-100000` | 612.58 us | 752.87 us |
+| `evaluate-multi-observer-distance-100000` | 1.56 ms | 1.70 ms |
+| `evaluate-compact-distance-100000` | 966.92 us | 1.09 ms |
+| `evaluate-distance-100000` | 3.87 ms | 4.06 ms |
+| `evaluate-screen-100000` | 11.48 ms | 19.53 ms |
+| `evaluate-budget-100000` | 16.59 ms | 28.12 ms |
+| `materialize-frame-100000` | 752.92 us | 1.03 ms |
+| `work-plan-100000` | 3.21 ms | 13.90 ms |
+| `patch-128-positions-100000` | 41.75 us | 110.00 us |
