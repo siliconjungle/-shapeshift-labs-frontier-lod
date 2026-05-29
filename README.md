@@ -163,17 +163,17 @@ npm run bench
 
 The benchmark covers 100k-item distance, compact typed-array, distance-band, sparse transition, multi-observer, screen-coverage, priority budget, materialization, scheduler work-plan, and patch-routed position update fixtures.
 
-Latest local package benchmark on Node v26.1.0, darwin arm64, 100k items and 30 rounds:
+Latest local package benchmark on Node v26.1.0, darwin arm64, 100k items and 40 rounds:
 
 | Fixture | Median | p95 |
 | --- | ---: | ---: |
-| `evaluate-bands-distance-100000` | 1.02 ms | 1.65 ms |
-| `evaluate-band-transitions-static-100000` | 822.87 us | 1.26 ms |
-| `evaluate-multi-observer-distance-100000` | 1.76 ms | 1.89 ms |
-| `evaluate-compact-distance-100000` | 1.34 ms | 2.32 ms |
-| `evaluate-distance-100000` | 5.10 ms | 6.08 ms |
-| `evaluate-screen-100000` | 17.38 ms | 31.32 ms |
-| `evaluate-budget-100000` | 21.76 ms | 30.00 ms |
-| `materialize-frame-100000` | 1.13 ms | 1.68 ms |
-| `work-plan-100000` | 12.61 ms | 16.18 ms |
-| `patch-128-positions-100000` | 99.25 us | 175.62 us |
+| `evaluate-bands-distance-100000` | 758.92 us | 1.02 ms |
+| `evaluate-band-transitions-static-100000` | 619.00 us | 1.01 ms |
+| `evaluate-multi-observer-distance-100000` | 1.66 ms | 1.80 ms |
+| `evaluate-compact-distance-100000` | 1.02 ms | 2.19 ms |
+| `evaluate-distance-100000` | 4.26 ms | 4.98 ms |
+| `evaluate-screen-100000` | 12.24 ms | 16.69 ms |
+| `evaluate-budget-100000` | 18.24 ms | 30.58 ms |
+| `materialize-frame-100000` | 938.83 us | 1.45 ms |
+| `work-plan-100000` | 3.67 ms | 14.46 ms |
+| `patch-128-positions-100000` | 69.46 us | 174.29 us |

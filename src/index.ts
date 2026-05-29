@@ -375,36 +375,48 @@ export function setLodItemEnabledPatch(index: number, enabled: boolean): Patch {
 
 export function createLodWorkPlan(frame: FrontierLodFrame, options: FrontierLodWorkPlanOptions = {}): FrontierLodWorkPlan {
   const nowMs = finiteOr(options.nowMs, 0);
-  const lastRunMsById = options.lastRunMsById ?? {};
+  const lastRunMsById = options.lastRunMsById;
+  const hasLastRunMs = lastRunMsById !== undefined && Object.keys(lastRunMsById).length !== 0;
+  const includeHidden = options.includeHidden === true;
+  const taskType = options.taskType ?? 'frontier.lod.compute';
+  const metadata = options.metadata;
+  const itemIndexes = frame.itemIndexes;
+  const ids = frame.ids;
+  const visible = frame.visible;
+  const intervals = frame.updateIntervalsMs;
+  const levels = frame.levels;
+  const levelIds = frame.levelIds;
+  const lanes = frame.lanes;
+  const computeCosts = frame.computeCosts;
   const items: FrontierLodWorkItem[] = [];
-  for (let i = 0; i < frame.itemIndexes.length; i++) {
-    const id = frame.ids[i];
-    const visible = frame.visible[i];
-    const interval = frame.updateIntervalsMs[i];
-    if (!visible && options.includeHidden !== true) continue;
+  for (let i = 0; i < itemIndexes.length; i++) {
+    const id = ids[i];
+    const itemVisible = visible[i];
+    const interval = intervals[i];
+    if (!itemVisible && !includeHidden) continue;
     let due = false;
     let reason: FrontierLodWorkItem['reason'] = 'interval';
-    if (!visible) {
+    if (!itemVisible) {
       reason = 'hidden';
     } else if (!Number.isFinite(interval) || interval < 0) {
       reason = 'never';
     } else {
-      const lastRun = lastRunMsById[id] ?? Number.NEGATIVE_INFINITY;
+      const lastRun = hasLastRunMs ? (lastRunMsById as Record<string, number>)[id] ?? Number.NEGATIVE_INFINITY : Number.NEGATIVE_INFINITY;
       due = nowMs - lastRun >= interval;
     }
-    if (!due && options.includeHidden !== true) continue;
+    if (!due && !includeHidden) continue;
     items[items.length] = {
       id,
-      index: frame.itemIndexes[i],
-      level: frame.levels[i],
-      levelId: frame.levelIds[i],
-      lane: frame.lanes[i] || 'lod',
-      key: id + ':' + frame.levelIds[i],
-      type: options.taskType ?? 'frontier.lod.compute',
-      units: Math.max(0, frame.computeCosts[i]),
+      index: itemIndexes[i],
+      level: levels[i],
+      levelId: levelIds[i],
+      lane: lanes[i] || 'lod',
+      key: id + ':' + levelIds[i],
+      type: taskType,
+      units: Math.max(0, computeCosts[i]),
       due,
       reason,
-      metadata: options.metadata
+      metadata
     };
   }
   return { kind: 'frontier.lod.work-plan', version: 1, generation: frame.generation, nowMs, items };
@@ -522,6 +534,7 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
     const normalizedObserver = normalizeObserver(observer);
     const mode = options.mode;
     const qualityBias = Math.max(EPSILON, normalizedObserver.qualityBias ?? 1);
+    const qualityScale = qualityBias * qualityBias;
     const hysteresisRatio = Math.max(0, options.hysteresisRatio ?? 0);
     const includeHidden = options.includeHidden === true;
     const itemIndexes: number[] = [];
@@ -549,66 +562,98 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
     if (bucketHeads) bucketHeads.fill(-1);
     if (buildBudgetBuckets && this.bucketNext.length < this.state.items.length) this.bucketNext = new Int32Array(this.state.items.length);
     const focal = focalPixels(normalizedObserver);
+    const itemCount = this.state.items.length;
+    const items = this.state.items;
+    const sourceProfiles = this.state.profiles;
+    const compiledProfiles = this.compiledProfiles;
+    const singleCompiledProfile = compiledProfiles.length === 1 ? compiledProfiles[0] : undefined;
+    const itemProfileIndexes = this.itemProfileIndexes;
+    const xs = this.x;
+    const ys = this.y;
+    const zs = this.z;
+    const radii = this.radius;
+    const priorities = this.priority;
+    const weights = this.weight;
+    const enabled = this.enabled;
 
-    for (let index = 0; index < this.state.items.length; index++) {
-      if (this.enabled[index] === 0) {
+    for (let index = 0; index < itemCount; index++) {
+      if (enabled[index] === 0) {
         this.lastLevels[index] = NO_LEVEL;
         this.lastVisible[index] = 0;
         if (includeHidden) {
-          appendAssignment(index, NO_LEVEL, false, 0, 0, 0, hiddenLevel());
+          appendAssignment(index, NO_LEVEL, false, 0, 0, 0, undefined);
         }
         continue;
       }
-      const profile = this.state.profiles[this.itemProfileIndexes[index]];
-      if (!profile || profileCount === 0) continue;
-      const dx = this.x[index] - normalizedObserver.x;
-      const dy = this.y[index] - normalizedObserver.y;
-      const dz = this.z[index] - (normalizedObserver.z ?? 0);
-      const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      const coverage = screenCoverage(this.radius[index], distance, focal, normalizedObserver.viewportHeight ?? DEFAULT_VIEWPORT_HEIGHT);
-      const score = significanceScore(distance, coverage, this.priority[index], this.weight[index], mode ?? profile.mode ?? 'distance');
-      const levelIndex = selectLevel(profile, distance, coverage, qualityBias, hysteresisRatio, this.lastLevels[index], mode);
-      const level = profile.levels[levelIndex] ?? hiddenLevel();
-      const isVisible = levelIndex !== NO_LEVEL && level.visible !== false;
-      const framePosition = appendAssignment(index, levelIndex, isVisible, distance, coverage, score, level);
-      if (bucketHeads && isVisible && canDegrade(profile, levelIndex)) {
+      const profileIndex = itemProfileIndexes[index];
+      const profile = sourceProfiles[profileIndex];
+      const compiledProfile = singleCompiledProfile ?? compiledProfiles[profileIndex];
+      if (!profile || !compiledProfile || profileCount === 0) continue;
+      const dx = xs[index] - normalizedObserver.x;
+      const dy = ys[index] - normalizedObserver.y;
+      const dz = zs[index] - (normalizedObserver.z ?? 0);
+      const distanceSquared = dx * dx + dy * dy + dz * dz;
+      const distance = Math.sqrt(distanceSquared);
+      const coverage = screenCoverage(radii[index], distance, focal, normalizedObserver.viewportHeight ?? DEFAULT_VIEWPORT_HEIGHT);
+      const activeMode = mode ?? compiledProfile.mode;
+      const score = significanceScore(distance, coverage, priorities[index], weights[index], activeMode);
+      let levelIndex: number;
+      if (hysteresisRatio === 0 && activeMode === 'distance') {
+        const maxDistanceSquares = compiledProfile.maxDistanceSquares;
+        levelIndex = compiledProfile.count - 1;
+        for (let candidate = 0; candidate < compiledProfile.count; candidate++) {
+          if (distanceSquared <= maxDistanceSquares[candidate] * qualityScale) {
+            levelIndex = candidate;
+            break;
+          }
+        }
+      } else {
+        levelIndex = hysteresisRatio === 0
+          ? selectCompiledLevel(compiledProfile, distance, coverage, qualityBias, activeMode)
+          : selectLevel(profile, distance, coverage, qualityBias, hysteresisRatio, this.lastLevels[index], mode);
+      }
+      const isVisible = levelIndex !== NO_LEVEL && compiledProfile.visible[levelIndex] === 1;
+      const framePosition = appendAssignment(index, levelIndex, isVisible, distance, coverage, score, compiledProfile);
+      if (bucketHeads && isVisible && levelIndex >= 0 && levelIndex < compiledProfile.count - 1) {
         const bucket = scoreBucket(score);
         this.bucketNext[framePosition] = bucketHeads[bucket];
         bucketHeads[bucket] = framePosition;
       }
     }
 
-    if (budget && bucketHeads && isBudgetExceeded(budget, visibleCount, totalRenderCost, totalComputeCost)) {
-      for (let bucket = 0; bucket < bucketHeads.length && isBudgetExceeded(budget, visibleCount, totalRenderCost, totalComputeCost); bucket++) {
+    if (budget && bucketHeads) {
+      let overBudget = isOverBudget(budget, visibleCount, totalRenderCost, totalComputeCost);
+      let budgetChanged = false;
+      for (let bucket = 0; bucket < bucketHeads.length && overBudget; bucket++) {
         let cursor = bucketHeads[bucket];
-        while (cursor !== -1 && isBudgetExceeded(budget, visibleCount, totalRenderCost, totalComputeCost)) {
+        while (cursor !== -1 && overBudget) {
           const itemIndex = itemIndexes[cursor];
-          const profile = this.state.profiles[this.itemProfileIndexes[itemIndex]];
+          const profile = singleCompiledProfile ?? compiledProfiles[itemProfileIndexes[itemIndex]];
           const currentLevelIndex = levels[cursor];
-          const nextLevelIndex = nextCheaperLevel(profile, currentLevelIndex);
+          const nextLevelIndex = nextCheaperCompiledLevel(profile, currentLevelIndex);
           if (nextLevelIndex !== currentLevelIndex) {
-            const previousLevel = profile.levels[currentLevelIndex] ?? hiddenLevel();
-            const nextLevel = profile.levels[nextLevelIndex] ?? hiddenLevel();
             const wasVisible = visible[cursor];
-            const nextVisible = nextLevelIndex !== NO_LEVEL && nextLevel.visible !== false;
-            totalRenderCost += levelRenderCost(nextLevel) - levelRenderCost(previousLevel);
-            totalComputeCost += levelComputeCost(nextLevel) - levelComputeCost(previousLevel);
+            const nextVisible = nextLevelIndex !== NO_LEVEL && profile.visible[nextLevelIndex] === 1;
+            totalRenderCost += compactRenderCost(profile, nextLevelIndex) - compactRenderCost(profile, currentLevelIndex);
+            totalComputeCost += compactComputeCost(profile, nextLevelIndex) - compactComputeCost(profile, currentLevelIndex);
             if (wasVisible && !nextVisible) visibleCount--;
             levels[cursor] = nextLevelIndex;
-            levelIds[cursor] = nextLevelIndex === NO_LEVEL ? 'hidden' : nextLevel.id;
+            levelIds[cursor] = nextLevelIndex === NO_LEVEL ? 'hidden' : profile.levelIds[nextLevelIndex];
             visible[cursor] = nextVisible;
-            renderCosts[cursor] = nextVisible ? levelRenderCost(nextLevel) : 0;
-            computeCosts[cursor] = nextVisible ? levelComputeCost(nextLevel) : 0;
-            updateIntervalsMs[cursor] = nextVisible ? levelUpdateInterval(nextLevel) : -1;
-            lanes[cursor] = nextVisible ? nextLevel.lane ?? 'lod' : '';
+            renderCosts[cursor] = nextVisible ? profile.renderCosts[nextLevelIndex] : 0;
+            computeCosts[cursor] = nextVisible ? profile.computeCosts[nextLevelIndex] : 0;
+            updateIntervalsMs[cursor] = nextVisible ? profile.updateIntervalsMs[nextLevelIndex] : -1;
+            lanes[cursor] = nextVisible ? profile.lanes[nextLevelIndex] : '';
             this.lastLevels[itemIndex] = nextLevelIndex;
             this.lastVisible[itemIndex] = nextVisible ? 1 : 0;
             changedIndexes[changedIndexes.length] = itemIndex;
+            budgetChanged = true;
+            overBudget = isOverBudget(budget, visibleCount, totalRenderCost, totalComputeCost);
           }
           cursor = this.bucketNext[cursor];
         }
       }
-      rebuildCounts();
+      if (budgetChanged) rebuildCounts();
     }
 
     return {
@@ -642,7 +687,7 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
       distance: number,
       coverage: number,
       score: number,
-      level: FrontierLodLevel
+      profile: CompiledLodProfile | undefined
     ): number {
       const previousLevel = thisRef.lastLevels[index];
       const previousVisible = thisRef.lastVisible[index] === 1;
@@ -650,25 +695,25 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
       thisRef.lastLevels[index] = levelIndex;
       thisRef.lastVisible[index] = isVisible ? 1 : 0;
       const position = itemIndexes.length;
-      const levelId = levelIndex === NO_LEVEL ? 'hidden' : level.id;
+      const levelId = levelIndex === NO_LEVEL || !profile ? 'hidden' : profile.levelIds[levelIndex];
       if (isVisible || includeHidden) {
         itemIndexes[position] = index;
-        ids[position] = thisRef.state.items[index].id;
+        ids[position] = items[index].id;
         levels[position] = levelIndex;
         levelIds[position] = levelId;
         visible[position] = isVisible;
         distances[position] = distance;
         screenCoverages[position] = coverage;
         scores[position] = score;
-        renderCosts[position] = isVisible ? levelRenderCost(level) : 0;
-        computeCosts[position] = isVisible ? levelComputeCost(level) : 0;
-        updateIntervalsMs[position] = isVisible ? levelUpdateInterval(level) : -1;
-        lanes[position] = isVisible ? level.lane ?? 'lod' : '';
+        renderCosts[position] = isVisible && profile ? profile.renderCosts[levelIndex] : 0;
+        computeCosts[position] = isVisible && profile ? profile.computeCosts[levelIndex] : 0;
+        updateIntervalsMs[position] = isVisible && profile ? profile.updateIntervalsMs[levelIndex] : -1;
+        lanes[position] = isVisible && profile ? profile.lanes[levelIndex] : '';
       }
       if (isVisible) {
         visibleCount++;
-        totalRenderCost += levelRenderCost(level);
-        totalComputeCost += levelComputeCost(level);
+        totalRenderCost += profile ? profile.renderCosts[levelIndex] : 0;
+        totalComputeCost += profile ? profile.computeCosts[levelIndex] : 0;
       }
       countsByLevel[levelId] = (countsByLevel[levelId] ?? 0) + 1;
       return position;
@@ -734,31 +779,44 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
     const eyeY = normalizedObserver.y;
     const eyeZ = normalizedObserver.z ?? 0;
     const viewportHeight = normalizedObserver.viewportHeight ?? DEFAULT_VIEWPORT_HEIGHT;
+    const qualityScale = qualityBias * qualityBias;
+    const itemCount = this.state.items.length;
+    const singleProfile = this.compiledProfiles.length === 1 ? this.compiledProfiles[0] : undefined;
+    const compiledProfiles = this.compiledProfiles;
+    const itemProfileIndexes = this.itemProfileIndexes;
+    const xs = this.x;
+    const ys = this.y;
+    const zs = this.z;
+    const radii = this.radius;
+    const priorities = this.priority;
+    const weights = this.weight;
+    const enabled = this.enabled;
 
-    for (let index = 0; index < this.state.items.length; index++) {
-      if (this.enabled[index] === 0) {
+    for (let index = 0; index < itemCount; index++) {
+      if (enabled[index] === 0) {
         writeCompact(frame, index, NO_LEVEL, false, 0, 0);
         continue;
       }
-      const profile = this.compiledProfiles[this.itemProfileIndexes[index]];
+      const profile = singleProfile ?? compiledProfiles[itemProfileIndexes[index]];
       if (!profile) {
         writeCompact(frame, index, NO_LEVEL, false, 0, 0);
         continue;
       }
-      const dx = this.x[index] - eyeX;
-      const dy = this.y[index] - eyeY;
-      const dz = this.z[index] - eyeZ;
-      const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const dx = xs[index] - eyeX;
+      const dy = ys[index] - eyeY;
+      const dz = zs[index] - eyeZ;
+      const distanceSquared = dx * dx + dy * dy + dz * dz;
+      const distance = Math.sqrt(distanceSquared);
       const activeMode = mode ?? profile.mode;
-      const coverage = activeMode === 'distance' ? 0 : screenCoverage(this.radius[index], distance, focal, viewportHeight);
+      const coverage = activeMode === 'distance' ? 0 : screenCoverage(radii[index], distance, focal, viewportHeight);
       const score = buildBudgetBuckets || activeMode !== 'distance'
-        ? significanceScore(distance, coverage, this.priority[index], this.weight[index], activeMode)
+        ? significanceScore(distance, coverage, priorities[index], weights[index], activeMode)
         : 0;
       let level = profile.count - 1;
       if (activeMode === 'distance') {
-        const maxDistances = profile.maxDistances;
+        const maxDistanceSquares = profile.maxDistanceSquares;
         for (let levelIndex = 0; levelIndex < profile.count; levelIndex++) {
-          if (distance <= maxDistances[levelIndex] * qualityBias) {
+          if (distanceSquared <= maxDistanceSquares[levelIndex] * qualityScale) {
             level = levelIndex;
             break;
           }
@@ -780,11 +838,12 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
       }
     }
 
-    if (budget && bucketHeads && isBudgetExceeded(budget, frame.visibleCount, frame.totalRenderCost, frame.totalComputeCost)) {
-      for (let bucket = 0; bucket < bucketHeads.length && isBudgetExceeded(budget, frame.visibleCount, frame.totalRenderCost, frame.totalComputeCost); bucket++) {
+    if (budget && bucketHeads) {
+      let overBudget = isOverBudget(budget, frame.visibleCount, frame.totalRenderCost, frame.totalComputeCost);
+      for (let bucket = 0; bucket < bucketHeads.length && overBudget; bucket++) {
         let cursor = bucketHeads[bucket];
-        while (cursor !== -1 && isBudgetExceeded(budget, frame.visibleCount, frame.totalRenderCost, frame.totalComputeCost)) {
-          const profile = this.compiledProfiles[this.itemProfileIndexes[cursor]];
+        while (cursor !== -1 && overBudget) {
+          const profile = singleProfile ?? compiledProfiles[itemProfileIndexes[cursor]];
           const current = frame.levels[cursor];
           const next = nextCheaperCompiledLevel(profile, current);
           if (next !== current) {
@@ -798,6 +857,7 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
             this.lastLevels[cursor] = next;
             this.lastVisible[cursor] = nextVisible ? 1 : 0;
             frame.changedIndexes[frame.changedIndexes.length] = cursor;
+            overBudget = isOverBudget(budget, frame.visibleCount, frame.totalRenderCost, frame.totalComputeCost);
           }
           cursor = this.bucketNext[cursor];
         }
@@ -830,14 +890,26 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
     const eyeZ = normalizedObserver.z ?? 0;
     const qualityBias = Math.max(EPSILON, normalizedObserver.qualityBias ?? 1);
     const qualityScale = qualityBias * qualityBias;
-    for (let index = 0; index < this.state.items.length; index++) {
+    const itemCount = this.state.items.length;
+    const singleProfile = this.compiledProfiles.length === 1 ? this.compiledProfiles[0] : undefined;
+    const compiledProfiles = this.compiledProfiles;
+    const itemProfileIndexes = this.itemProfileIndexes;
+    const xs = this.x;
+    const ys = this.y;
+    const zs = this.z;
+    const enabled = this.enabled;
+    const lastLevels = this.lastLevels;
+    const lastVisible = this.lastVisible;
+    const frameLevels = frame.levels;
+    const frameVisible = frame.visible;
+    for (let index = 0; index < itemCount; index++) {
       let level = NO_LEVEL;
       let isVisible = false;
-      if (this.enabled[index] !== 0) {
-        const profile = this.compiledProfiles[this.itemProfileIndexes[index]];
-        const dx = this.x[index] - eyeX;
-        const dy = this.y[index] - eyeY;
-        const dz = this.z[index] - eyeZ;
+      if (enabled[index] !== 0) {
+        const profile = singleProfile ?? compiledProfiles[itemProfileIndexes[index]];
+        const dx = xs[index] - eyeX;
+        const dy = ys[index] - eyeY;
+        const dz = zs[index] - eyeZ;
         const distanceSquared = dx * dx + dy * dy + dz * dz;
         const maxDistanceSquares = profile.maxDistanceSquares;
         level = profile.count - 1;
@@ -849,13 +921,13 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
         }
         isVisible = level !== NO_LEVEL && profile.visible[level] === 1;
       }
-      const previousLevel = this.lastLevels[index];
-      const previousVisible = this.lastVisible[index] === 1;
+      const previousLevel = lastLevels[index];
+      const previousVisible = lastVisible[index] === 1;
       if (previousLevel !== level || previousVisible !== isVisible) frame.changedIndexes[frame.changedIndexes.length] = index;
-      frame.levels[index] = level;
-      frame.visible[index] = isVisible ? 1 : 0;
-      this.lastLevels[index] = level;
-      this.lastVisible[index] = isVisible ? 1 : 0;
+      frameLevels[index] = level;
+      frameVisible[index] = isVisible ? 1 : 0;
+      lastLevels[index] = level;
+      lastVisible[index] = isVisible ? 1 : 0;
       if (isVisible) frame.visibleCount++;
     }
     return frame;
@@ -873,14 +945,24 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
     const eyeZ = normalizedObserver.z ?? 0;
     const qualityBias = Math.max(EPSILON, normalizedObserver.qualityBias ?? 1);
     const qualityScale = qualityBias * qualityBias;
-    for (let index = 0; index < this.state.items.length; index++) {
+    const itemCount = this.state.items.length;
+    const singleProfile = this.compiledProfiles.length === 1 ? this.compiledProfiles[0] : undefined;
+    const compiledProfiles = this.compiledProfiles;
+    const itemProfileIndexes = this.itemProfileIndexes;
+    const xs = this.x;
+    const ys = this.y;
+    const zs = this.z;
+    const enabled = this.enabled;
+    const lastLevels = this.lastLevels;
+    const lastVisible = this.lastVisible;
+    for (let index = 0; index < itemCount; index++) {
       let level = NO_LEVEL;
       let isVisible = false;
-      if (this.enabled[index] !== 0) {
-        const profile = this.compiledProfiles[this.itemProfileIndexes[index]];
-        const dx = this.x[index] - eyeX;
-        const dy = this.y[index] - eyeY;
-        const dz = this.z[index] - eyeZ;
+      if (enabled[index] !== 0) {
+        const profile = singleProfile ?? compiledProfiles[itemProfileIndexes[index]];
+        const dx = xs[index] - eyeX;
+        const dy = ys[index] - eyeY;
+        const dz = zs[index] - eyeZ;
         const distanceSquared = dx * dx + dy * dy + dz * dz;
         const maxDistanceSquares = profile.maxDistanceSquares;
         level = profile.count - 1;
@@ -892,8 +974,8 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
         }
         isVisible = level !== NO_LEVEL && profile.visible[level] === 1;
       }
-      const previousLevel = this.lastLevels[index];
-      const wasVisible = this.lastVisible[index] === 1;
+      const previousLevel = lastLevels[index];
+      const wasVisible = lastVisible[index] === 1;
       if (previousLevel !== level || wasVisible !== isVisible) {
         const position = frame.transitionCount++;
         frame.indexes[position] = index;
@@ -902,8 +984,8 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
         frame.previousVisible[position] = wasVisible ? 1 : 0;
         frame.visible[position] = isVisible ? 1 : 0;
       }
-      this.lastLevels[index] = level;
-      this.lastVisible[index] = isVisible ? 1 : 0;
+      lastLevels[index] = level;
+      lastVisible[index] = isVisible ? 1 : 0;
       if (isVisible) frame.visibleCount++;
     }
     return frame;
@@ -1117,11 +1199,14 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
 interface CompiledLodProfile {
   mode: FrontierLodMode;
   count: number;
+  levelIds: string[];
+  lanes: string[];
   maxDistances: Float64Array;
   maxDistanceSquares: Float64Array;
   minScreenCoverages: Float64Array;
   renderCosts: Float64Array;
   computeCosts: Float64Array;
+  updateIntervalsMs: Float64Array;
   visible: Uint8Array;
 }
 
@@ -1170,29 +1255,38 @@ function ensureMultiObserverFrame(target: FrontierLodMultiObserverFrame | undefi
 
 function compileProfile(profile: FrontierLodProfile): CompiledLodProfile {
   const count = profile.levels.length;
+  const levelIds = new Array<string>(count);
+  const lanes = new Array<string>(count);
   const maxDistances = new Float64Array(count);
   const maxDistanceSquares = new Float64Array(count);
   const minScreenCoverages = new Float64Array(count);
   const renderCosts = new Float64Array(count);
   const computeCosts = new Float64Array(count);
+  const updateIntervalsMs = new Float64Array(count);
   const visible = new Uint8Array(count);
   for (let i = 0; i < count; i++) {
     const level = profile.levels[i];
+    levelIds[i] = level.id;
+    lanes[i] = level.lane ?? 'lod';
     maxDistances[i] = level.maxDistance ?? Number.POSITIVE_INFINITY;
     maxDistanceSquares[i] = maxDistances[i] * maxDistances[i];
     minScreenCoverages[i] = level.minScreenCoverage ?? Number.NEGATIVE_INFINITY;
     renderCosts[i] = levelRenderCost(level);
     computeCosts[i] = levelComputeCost(level);
+    updateIntervalsMs[i] = levelUpdateInterval(level);
     visible[i] = level.visible === false ? 0 : 1;
   }
   return {
     mode: profile.mode ?? 'distance',
     count,
+    levelIds,
+    lanes,
     maxDistances,
     maxDistanceSquares,
     minScreenCoverages,
     renderCosts,
     computeCosts,
+    updateIntervalsMs,
     visible
   };
 }
@@ -1379,22 +1473,7 @@ function selectLevel(
   return levels.length - 1;
 }
 
-function canDegrade(profile: FrontierLodProfile, levelIndex: number): boolean {
-  return levelIndex >= 0 && levelIndex < profile.levels.length - 1;
-}
-
-function nextCheaperLevel(profile: FrontierLodProfile, levelIndex: number): number {
-  if (levelIndex < 0) return levelIndex;
-  const current = profile.levels[levelIndex] ?? hiddenLevel();
-  const currentCost = levelRenderCost(current) + levelComputeCost(current);
-  for (let i = levelIndex + 1; i < profile.levels.length; i++) {
-    const next = profile.levels[i];
-    if (next.visible === false || levelRenderCost(next) + levelComputeCost(next) <= currentCost) return i;
-  }
-  return levelIndex;
-}
-
-function isBudgetExceeded(budget: FrontierLodBudget, visibleCount: number, renderCost: number, computeCost: number): boolean {
+function isOverBudget(budget: FrontierLodBudget, visibleCount: number, renderCost: number, computeCost: number): boolean {
   return (budget.maxVisible !== undefined && visibleCount > budget.maxVisible) ||
     (budget.maxRenderCost !== undefined && renderCost > budget.maxRenderCost) ||
     (budget.maxComputeCost !== undefined && computeCost > budget.maxComputeCost);
@@ -1435,10 +1514,6 @@ function levelComputeCost(level: FrontierLodLevel): number {
 
 function levelUpdateInterval(level: FrontierLodLevel): number {
   return level.visible === false ? -1 : finiteOr(level.updateIntervalMs, 0);
-}
-
-function hiddenLevel(): FrontierLodLevel {
-  return { id: 'hidden', visible: false, renderCost: 0, computeCost: 0, updateIntervalMs: -1 };
 }
 
 function isItemScalarField(value: string | number): boolean {
