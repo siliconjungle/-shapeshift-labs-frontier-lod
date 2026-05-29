@@ -453,16 +453,31 @@ export function scheduleLodWork(
 }
 
 export function materializeLodFrame(frame: FrontierLodFrame): FrontierLodMaterialization {
-  const visibleIndexes: number[] = [];
-  const hiddenIndexes: number[] = [];
+  const total = frame.itemIndexes.length;
+  const visibleIndexes = new Array<number>(frame.visibleCount);
+  const hiddenIndexes = new Array<number>(Math.max(0, total - frame.visibleCount));
   const byLevel: Record<string, number[]> = {};
-  for (let i = 0; i < frame.itemIndexes.length; i++) {
-    const index = frame.itemIndexes[i];
-    if (frame.visible[i]) visibleIndexes[visibleIndexes.length] = index;
-    else hiddenIndexes[hiddenIndexes.length] = index;
-    const levelId = frame.levelIds[i] || 'hidden';
-    (byLevel[levelId] ??= [])[byLevel[levelId].length] = index;
+  const byLevelPositions: Record<string, number> = {};
+  const levelCounts = frame.countsByLevel;
+  for (const levelId of Object.keys(levelCounts)) {
+    byLevel[levelId] = new Array<number>(levelCounts[levelId]);
+    byLevelPositions[levelId] = 0;
   }
+  let visibleWrite = 0;
+  let hiddenWrite = 0;
+  for (let i = 0; i < total; i++) {
+    const index = frame.itemIndexes[i];
+    if (frame.visible[i]) visibleIndexes[visibleWrite++] = index;
+    else hiddenIndexes[hiddenWrite++] = index;
+    const levelId = frame.levelIds[i] || 'hidden';
+    const levelItems = byLevel[levelId] ?? (byLevel[levelId] = []);
+    const position = byLevelPositions[levelId] ?? 0;
+    levelItems[position] = index;
+    byLevelPositions[levelId] = position + 1;
+  }
+  visibleIndexes.length = visibleWrite;
+  hiddenIndexes.length = hiddenWrite;
+  for (const levelId of Object.keys(byLevelPositions)) byLevel[levelId].length = byLevelPositions[levelId];
   return { kind: 'frontier.lod.materialization', version: 1, generation: frame.generation, visibleIndexes, hiddenIndexes, byLevel };
 }
 
@@ -511,12 +526,39 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
     const dirtyItemIndexes: number[] = [];
     let structural = false;
     for (let i = 0; i < patch.length; i++) {
-      const path = patch[i][1];
-      if (path.length === 3 && path[0] === 'items' && typeof path[1] === 'number' && isItemScalarField(path[2])) {
-        dirtyItemIndexes[dirtyItemIndexes.length] = path[1];
+      const op = patch[i];
+      const path = op[1];
+      if (
+        op[0] === 0 &&
+        path.length === 3 &&
+        path[0] === 'items' &&
+        typeof path[1] === 'number' &&
+        path[1] >= 0 &&
+        path[1] < this.state.items.length &&
+        isItemScalarField(path[2])
+      ) {
+        const itemIndex = path[1];
+        dirtyItemIndexes[dirtyItemIndexes.length] = itemIndex;
       } else {
         structural = true;
       }
+    }
+    if (!structural) {
+      for (let i = 0; i < patch.length; i++) {
+        const op = patch[i];
+        const path = op[1];
+        const item = this.state.items[path[1] as number] as FrontierLodItem & Record<string, JsonValue | undefined>;
+        item[path[2] as string] = op[2] as JsonValue;
+      }
+      this.generationValue++;
+      let previousDirtyIndex = -1;
+      for (let i = 0; i < dirtyItemIndexes.length; i++) {
+        const dirtyIndex = dirtyItemIndexes[i];
+        if (dirtyIndex === previousDirtyIndex) continue;
+        previousDirtyIndex = dirtyIndex;
+        this.updateItemCache(dirtyIndex);
+      }
+      return { changed: true, structural: false, patch, dirtyItemIndexes, generation: this.generationValue, origin: options.origin };
     }
     const previousLength = this.state.items.length;
     this.state = applyPatch(this.state as unknown as JsonValue, patch) as unknown as FrontierLodSnapshot;
@@ -526,7 +568,13 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
       this.rebuildCaches();
       return { changed: true, structural: true, patch, dirtyItemIndexes, generation: this.generationValue, origin: options.origin };
     }
-    for (let i = 0; i < dirtyItemIndexes.length; i++) this.updateItemCache(dirtyItemIndexes[i]);
+    let previousDirtyIndex = -1;
+    for (let i = 0; i < dirtyItemIndexes.length; i++) {
+      const dirtyIndex = dirtyItemIndexes[i];
+      if (dirtyIndex === previousDirtyIndex) continue;
+      previousDirtyIndex = dirtyIndex;
+      this.updateItemCache(dirtyIndex);
+    }
     return { changed: true, structural: false, patch, dirtyItemIndexes, generation: this.generationValue, origin: options.origin };
   }
 
@@ -791,7 +839,6 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
     const priorities = this.priority;
     const weights = this.weight;
     const enabled = this.enabled;
-
     for (let index = 0; index < itemCount; index++) {
       if (enabled[index] === 0) {
         writeCompact(frame, index, NO_LEVEL, false, 0, 0);
@@ -1007,7 +1054,7 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
       this.observerX[observerIndex] = observer.x;
       this.observerY[observerIndex] = observer.y;
       this.observerZ[observerIndex] = observer.z ?? 0;
-      this.observerQualityScale[observerIndex] = qualityBias * qualityBias;
+      this.observerQualityScale[observerIndex] = 1 / (qualityBias * qualityBias);
     }
     const xs = this.x;
     const ys = this.y;
@@ -1038,7 +1085,7 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
           const dx = itemX - observerX[0];
           const dy = itemY - observerY[0];
           const dz = itemZ - observerZ[0];
-          bestScaledDistanceSquared = (dx * dx + dy * dy + dz * dz) / observerQualityScale[0];
+          bestScaledDistanceSquared = (dx * dx + dy * dy + dz * dz) * observerQualityScale[0];
           bestObserver = 0;
         } else if (observerCount === 2) {
           const dx0 = itemX - observerX[0];
@@ -1047,8 +1094,8 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
           const dx1 = itemX - observerX[1];
           const dy1 = itemY - observerY[1];
           const dz1 = itemZ - observerZ[1];
-          const d0 = (dx0 * dx0 + dy0 * dy0 + dz0 * dz0) / observerQualityScale[0];
-          const d1 = (dx1 * dx1 + dy1 * dy1 + dz1 * dz1) / observerQualityScale[1];
+          const d0 = (dx0 * dx0 + dy0 * dy0 + dz0 * dz0) * observerQualityScale[0];
+          const d1 = (dx1 * dx1 + dy1 * dy1 + dz1 * dz1) * observerQualityScale[1];
           if (d0 <= d1) {
             bestScaledDistanceSquared = d0;
             bestObserver = 0;
@@ -1066,14 +1113,14 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
           const dx2 = itemX - observerX[2];
           const dy2 = itemY - observerY[2];
           const dz2 = itemZ - observerZ[2];
-          bestScaledDistanceSquared = (dx0 * dx0 + dy0 * dy0 + dz0 * dz0) / observerQualityScale[0];
+          bestScaledDistanceSquared = (dx0 * dx0 + dy0 * dy0 + dz0 * dz0) * observerQualityScale[0];
           bestObserver = 0;
-          const d1 = (dx1 * dx1 + dy1 * dy1 + dz1 * dz1) / observerQualityScale[1];
+          const d1 = (dx1 * dx1 + dy1 * dy1 + dz1 * dz1) * observerQualityScale[1];
           if (d1 < bestScaledDistanceSquared) {
             bestScaledDistanceSquared = d1;
             bestObserver = 1;
           }
-          const d2 = (dx2 * dx2 + dy2 * dy2 + dz2 * dz2) / observerQualityScale[2];
+          const d2 = (dx2 * dx2 + dy2 * dy2 + dz2 * dz2) * observerQualityScale[2];
           if (d2 < bestScaledDistanceSquared) {
             bestScaledDistanceSquared = d2;
             bestObserver = 2;
@@ -1091,19 +1138,19 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
           const dx3 = itemX - observerX[3];
           const dy3 = itemY - observerY[3];
           const dz3 = itemZ - observerZ[3];
-          bestScaledDistanceSquared = (dx0 * dx0 + dy0 * dy0 + dz0 * dz0) / observerQualityScale[0];
+          bestScaledDistanceSquared = (dx0 * dx0 + dy0 * dy0 + dz0 * dz0) * observerQualityScale[0];
           bestObserver = 0;
-          const d1 = (dx1 * dx1 + dy1 * dy1 + dz1 * dz1) / observerQualityScale[1];
+          const d1 = (dx1 * dx1 + dy1 * dy1 + dz1 * dz1) * observerQualityScale[1];
           if (d1 < bestScaledDistanceSquared) {
             bestScaledDistanceSquared = d1;
             bestObserver = 1;
           }
-          const d2 = (dx2 * dx2 + dy2 * dy2 + dz2 * dz2) / observerQualityScale[2];
+          const d2 = (dx2 * dx2 + dy2 * dy2 + dz2 * dz2) * observerQualityScale[2];
           if (d2 < bestScaledDistanceSquared) {
             bestScaledDistanceSquared = d2;
             bestObserver = 2;
           }
-          const d3 = (dx3 * dx3 + dy3 * dy3 + dz3 * dz3) / observerQualityScale[3];
+          const d3 = (dx3 * dx3 + dy3 * dy3 + dz3 * dz3) * observerQualityScale[3];
           if (d3 < bestScaledDistanceSquared) {
             bestScaledDistanceSquared = d3;
             bestObserver = 3;
@@ -1114,7 +1161,7 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
             const dx = itemX - observerX[observerIndex];
             const dy = itemY - observerY[observerIndex];
             const dz = itemZ - observerZ[observerIndex];
-            const scaledDistanceSquared = (dx * dx + dy * dy + dz * dz) / observerQualityScale[observerIndex];
+            const scaledDistanceSquared = (dx * dx + dy * dy + dz * dz) * observerQualityScale[observerIndex];
             if (scaledDistanceSquared < bestScaledDistanceSquared) {
               bestScaledDistanceSquared = scaledDistanceSquared;
               bestObserver = observerIndex;
