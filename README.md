@@ -12,6 +12,7 @@ import {
   createLodBandFrame,
   createLodCompactFrame,
   createLodEngine,
+  createLodMultiObserverFrame,
   createLodTransitionFrame,
   createLodWorkPlan,
   lodItem,
@@ -53,6 +54,10 @@ lod.commit(setLodItemPositionPatch(1, 40, 0), {
 const compact = lod.evaluateInto(createLodCompactFrame(lod.itemCount), { x: 0, y: 0 }, { mode: 'distance' });
 const bands = lod.evaluateBandsInto(createLodBandFrame(lod.itemCount), { x: 0, y: 0 });
 const transitions = lod.evaluateBandTransitionsInto(createLodTransitionFrame(lod.itemCount), { x: 0, y: 0 });
+const sharedWorld = lod.evaluateMultiObserverInto(createLodMultiObserverFrame(lod.itemCount), [
+  { x: 0, y: 0 },
+  { x: 300, y: 0, qualityBias: 0.9 }
+]);
 ```
 
 ## Design Notes
@@ -69,6 +74,7 @@ const transitions = lod.evaluateBandTransitionsInto(createLodTransitionFrame(lod
 - `evaluateInto(...)` reuses typed buffers for per-frame distance/screen/priority loops.
 - `evaluateBandsInto(...)` is a distance-band-only hot path for very large homogeneous sets.
 - `evaluateBandTransitionsInto(...)` is a Unity CullingGroup-style event path: it keeps internal band state current but only materializes changed indexes, previous levels, and next levels.
+- `evaluateMultiObserverInto(...)` selects one shared LOD frame across several cameras, spectators, minimaps, AI-interest origins, or server-relevance observers without requiring separate full frames and a merge pass.
 - `materializeLodFrame(...)` exposes visible/hidden/by-level index lists for DOM, Canvas, WebGL, WebGPU, or game hosts.
 - `createLodWorkPlan(...)` converts levels and update intervals into scheduler-friendly compute tasks.
 - Scheduler integration is structural, so `frontier-scheduler` can queue work without becoming a dependency.
@@ -155,18 +161,19 @@ Run package-local measurements:
 npm run bench
 ```
 
-The benchmark covers 100k-item distance, compact typed-array, distance-band, sparse transition, screen-coverage, priority budget, materialization, scheduler work-plan, and patch-routed position update fixtures.
+The benchmark covers 100k-item distance, compact typed-array, distance-band, sparse transition, multi-observer, screen-coverage, priority budget, materialization, scheduler work-plan, and patch-routed position update fixtures.
 
 Latest local package benchmark on Node v26.1.0, darwin arm64, 100k items and 30 rounds:
 
 | Fixture | Median | p95 |
 | --- | ---: | ---: |
-| `evaluate-bands-distance-100000` | 1.00 ms | 1.38 ms |
-| `evaluate-band-transitions-static-100000` | 789.38 us | 1.34 ms |
-| `evaluate-compact-distance-100000` | 1.34 ms | 2.20 ms |
-| `evaluate-distance-100000` | 4.64 ms | 6.39 ms |
-| `evaluate-screen-100000` | 16.41 ms | 31.75 ms |
-| `evaluate-budget-100000` | 21.20 ms | 30.55 ms |
-| `materialize-frame-100000` | 920.46 us | 1.33 ms |
-| `work-plan-100000` | 13.47 ms | 17.96 ms |
-| `patch-128-positions-100000` | 110.46 us | 202.08 us |
+| `evaluate-bands-distance-100000` | 1.02 ms | 1.65 ms |
+| `evaluate-band-transitions-static-100000` | 822.87 us | 1.26 ms |
+| `evaluate-multi-observer-distance-100000` | 1.76 ms | 1.89 ms |
+| `evaluate-compact-distance-100000` | 1.34 ms | 2.32 ms |
+| `evaluate-distance-100000` | 5.10 ms | 6.08 ms |
+| `evaluate-screen-100000` | 17.38 ms | 31.32 ms |
+| `evaluate-budget-100000` | 21.76 ms | 30.00 ms |
+| `materialize-frame-100000` | 1.13 ms | 1.68 ms |
+| `work-plan-100000` | 12.61 ms | 16.18 ms |
+| `patch-128-positions-100000` | 99.25 us | 175.62 us |

@@ -1,6 +1,8 @@
 import assert from 'node:assert';
 import {
+  createLodBandFrame,
   createLodEngine,
+  createLodMultiObserverFrame,
   createLodTransitionFrame,
   lodItem,
   lodLevel,
@@ -28,6 +30,7 @@ for (let i = 0; i < cases; i++) {
   }
   const engine = createLodEngine({ profiles: [profile], items });
   const transitionEngine = createLodEngine({ profiles: [profile], items });
+  const multiEngine = createLodEngine({ profiles: [profile], items });
   const frame = engine.evaluate({
     x: randRange(-50, 50),
     y: randRange(-50, 50),
@@ -70,6 +73,24 @@ for (let i = 0; i < cases; i++) {
   }
   assert.strictEqual(transitionEngine.evaluateBandTransitionsInto(transitions, observer).transitionCount, 0);
 
+  const observers = new Array(randInt(1, 4));
+  for (let j = 0; j < observers.length; j++) {
+    observers[j] = {
+      x: randRange(-100, 100),
+      y: randRange(-100, 100),
+      z: randRange(-10, 10),
+      qualityBias: randRange(0.5, 2)
+    };
+  }
+  const multi = multiEngine.evaluateMultiObserverInto(createLodMultiObserverFrame(itemCount), observers);
+  const naive = naiveMultiObserver({ profiles: [profile], items }, observers, itemCount);
+  assert.strictEqual(multi.visibleCount, naive.visibleCount);
+  for (let j = 0; j < itemCount; j++) {
+    assert.strictEqual(multi.levels[j], naive.levels[j]);
+    assert.strictEqual(multi.visible[j], naive.visible[j]);
+    assert.ok(multi.observerIndexes[j] >= -1 && multi.observerIndexes[j] < observers.length);
+  }
+
   const patchIndex = randInt(0, itemCount - 1);
   const nextX = randRange(-100, 100);
   engine.commit(setLodItemPositionPatch(patchIndex, nextX, randRange(-100, 100), randRange(-10, 10)));
@@ -94,6 +115,33 @@ function makeProfile(levelCount) {
   }
   levels.push(lodLevel('hidden', { visible: false, renderCost: 0, computeCost: 0, updateIntervalMs: -1 }));
   return lodProfile('p' + randInt(0, 100000), levels, { mode: pick(['distance', 'screen', 'priority']) });
+}
+
+function naiveMultiObserver(snapshot, observers, itemCount) {
+  const levels = new Int16Array(itemCount);
+  const visible = new Uint8Array(itemCount);
+  const observerIndexes = new Int32Array(itemCount);
+  levels.fill(-1);
+  observerIndexes.fill(-1);
+  let visibleCount = 0;
+  for (let observerIndex = 0; observerIndex < observers.length; observerIndex++) {
+    const engine = createLodEngine(snapshot);
+    const frame = engine.evaluateBandsInto(createLodBandFrame(itemCount), observers[observerIndex]);
+    for (let itemIndex = 0; itemIndex < itemCount; itemIndex++) {
+      const nextLevel = frame.levels[itemIndex];
+      if (nextLevel === -1) continue;
+      const nextVisible = frame.visible[itemIndex];
+      const previousVisible = visible[itemIndex];
+      if (levels[itemIndex] === -1 || nextLevel < levels[itemIndex]) {
+        if (previousVisible === 0 && nextVisible !== 0) visibleCount++;
+        else if (previousVisible !== 0 && nextVisible === 0) visibleCount--;
+        levels[itemIndex] = nextLevel;
+        visible[itemIndex] = nextVisible;
+        observerIndexes[itemIndex] = observerIndex;
+      }
+    }
+  }
+  return { levels, visible, observerIndexes, visibleCount };
 }
 
 function rand() {

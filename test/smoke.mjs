@@ -1,6 +1,7 @@
 import assert from 'node:assert';
 import {
   createLodEngine,
+  createLodMultiObserverFrame,
   createLodTransitionFrame,
   createLodWorkPlan,
   lodItem,
@@ -60,6 +61,28 @@ assert.strictEqual(transitions.visibleCount, bands.visibleCount);
 assert.deepStrictEqual(Array.from(transitions.indexes.slice(0, transitions.transitionCount)), [0, 1, 2]);
 const stableTransitions = transitionEngine.evaluateBandTransitionsInto(transitions, { x: 0, y: 0 });
 assert.strictEqual(stableTransitions.transitionCount, 0);
+
+const multiObserverEngine = createLodEngine({
+  profiles: [profile],
+  items: [
+    lodItem('a', 0, 0, { profile: 'npc', radius: 2, priority: 2 }),
+    lodItem('b', 40, 0, { profile: 'npc', radius: 1 }),
+    lodItem('c', 300, 0, { profile: 'npc', radius: 1 })
+  ]
+});
+const multi = multiObserverEngine.evaluateMultiObserverInto(createLodMultiObserverFrame(3), [
+  { x: 0, y: 0 },
+  { x: 300, y: 0 }
+]);
+assert.strictEqual(multi.kind, 'frontier.lod.multi-observer-frame');
+assert.strictEqual(multi.itemCount, 3);
+assert.strictEqual(multi.observerCount, 2);
+assert.strictEqual(multi.visibleCount, 3);
+assert.strictEqual(multi.levels[2], 0);
+assert.strictEqual(multi.observerIndexes[2], 1);
+const hiddenMulti = multiObserverEngine.evaluateMultiObserverInto(multi, []);
+assert.strictEqual(hiddenMulti.visibleCount, 0);
+assert.deepStrictEqual(Array.from(hiddenMulti.observerIndexes.slice(0, hiddenMulti.itemCount)), [-1, -1, -1]);
 
 const assignments = engine.assignments(frame);
 assert.strictEqual(assignments[0].id, 'a');

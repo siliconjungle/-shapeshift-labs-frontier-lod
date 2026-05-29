@@ -155,6 +155,19 @@ export interface FrontierLodTransitionFrame {
   visible: Uint8Array;
 }
 
+export interface FrontierLodMultiObserverFrame {
+  kind: 'frontier.lod.multi-observer-frame';
+  version: 1;
+  generation: number;
+  itemCount: number;
+  observerCount: number;
+  levels: Int16Array;
+  visible: Uint8Array;
+  observerIndexes: Int32Array;
+  visibleCount: number;
+  changedIndexes: number[];
+}
+
 export interface FrontierLodAssignment {
   id: string;
   index: number;
@@ -253,6 +266,7 @@ export interface FrontierLodEngine {
   evaluateInto(target: FrontierLodCompactFrame | undefined, observer: FrontierLodObserver, options?: FrontierLodEvaluateOptions): FrontierLodCompactFrame;
   evaluateBandsInto(target: FrontierLodBandFrame | undefined, observer: FrontierLodObserver): FrontierLodBandFrame;
   evaluateBandTransitionsInto(target: FrontierLodTransitionFrame | undefined, observer: FrontierLodObserver): FrontierLodTransitionFrame;
+  evaluateMultiObserverInto(target: FrontierLodMultiObserverFrame | undefined, observers: readonly FrontierLodObserver[]): FrontierLodMultiObserverFrame;
   assignments(frame: FrontierLodFrame): FrontierLodAssignment[];
   createWorkPlan(frame: FrontierLodFrame, options?: FrontierLodWorkPlanOptions): FrontierLodWorkPlan;
 }
@@ -307,6 +321,24 @@ export function createLodTransitionFrame(capacity = 0): FrontierLodTransitionFra
     levels: new Int16Array(size),
     previousVisible: new Uint8Array(size),
     visible: new Uint8Array(size)
+  };
+}
+
+export function createLodMultiObserverFrame(capacity = 0): FrontierLodMultiObserverFrame {
+  const size = Math.max(0, Math.floor(capacity));
+  const observerIndexes = new Int32Array(size);
+  observerIndexes.fill(-1);
+  return {
+    kind: 'frontier.lod.multi-observer-frame',
+    version: 1,
+    generation: 0,
+    itemCount: 0,
+    observerCount: 0,
+    levels: new Int16Array(size),
+    visible: new Uint8Array(size),
+    observerIndexes,
+    visibleCount: 0,
+    changedIndexes: []
   };
 }
 
@@ -438,6 +470,10 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
   private lastLevels = new Int16Array(0);
   private lastVisible = new Uint8Array(0);
   private bucketNext = new Int32Array(0);
+  private observerX = new Float64Array(0);
+  private observerY = new Float64Array(0);
+  private observerZ = new Float64Array(0);
+  private observerQualityScale = new Float64Array(0);
 
   constructor(snapshot: FrontierLodSnapshot) {
     this.state = cloneSnapshot(snapshot);
@@ -873,6 +909,160 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
     return frame;
   }
 
+  evaluateMultiObserverInto(target: FrontierLodMultiObserverFrame | undefined, observers: readonly FrontierLodObserver[]): FrontierLodMultiObserverFrame {
+    const observerCount = observers.length;
+    const itemCount = this.state.items.length;
+    const frame = ensureMultiObserverFrame(target, itemCount);
+    frame.generation = this.generationValue;
+    frame.itemCount = itemCount;
+    frame.observerCount = observerCount;
+    frame.visibleCount = 0;
+    frame.changedIndexes.length = 0;
+    this.ensureObserverScratch(observerCount);
+    for (let observerIndex = 0; observerIndex < observerCount; observerIndex++) {
+      const observer = normalizeObserver(observers[observerIndex]);
+      const qualityBias = Math.max(EPSILON, observer.qualityBias ?? 1);
+      this.observerX[observerIndex] = observer.x;
+      this.observerY[observerIndex] = observer.y;
+      this.observerZ[observerIndex] = observer.z ?? 0;
+      this.observerQualityScale[observerIndex] = qualityBias * qualityBias;
+    }
+    const xs = this.x;
+    const ys = this.y;
+    const zs = this.z;
+    const enabled = this.enabled;
+    const levels = frame.levels;
+    const visible = frame.visible;
+    const observerIndexes = frame.observerIndexes;
+    const lastLevels = this.lastLevels;
+    const lastVisible = this.lastVisible;
+    const itemProfileIndexes = this.itemProfileIndexes;
+    const compiledProfiles = this.compiledProfiles;
+    const singleProfile = compiledProfiles.length === 1 ? compiledProfiles[0] : undefined;
+    const observerX = this.observerX;
+    const observerY = this.observerY;
+    const observerZ = this.observerZ;
+    const observerQualityScale = this.observerQualityScale;
+    for (let index = 0; index < itemCount; index++) {
+      let level = NO_LEVEL;
+      let isVisible = false;
+      let bestObserver = -1;
+      if (enabled[index] !== 0 && observerCount !== 0) {
+        const itemX = xs[index];
+        const itemY = ys[index];
+        const itemZ = zs[index];
+        let bestScaledDistanceSquared: number;
+        if (observerCount === 1) {
+          const dx = itemX - observerX[0];
+          const dy = itemY - observerY[0];
+          const dz = itemZ - observerZ[0];
+          bestScaledDistanceSquared = (dx * dx + dy * dy + dz * dz) / observerQualityScale[0];
+          bestObserver = 0;
+        } else if (observerCount === 2) {
+          const dx0 = itemX - observerX[0];
+          const dy0 = itemY - observerY[0];
+          const dz0 = itemZ - observerZ[0];
+          const dx1 = itemX - observerX[1];
+          const dy1 = itemY - observerY[1];
+          const dz1 = itemZ - observerZ[1];
+          const d0 = (dx0 * dx0 + dy0 * dy0 + dz0 * dz0) / observerQualityScale[0];
+          const d1 = (dx1 * dx1 + dy1 * dy1 + dz1 * dz1) / observerQualityScale[1];
+          if (d0 <= d1) {
+            bestScaledDistanceSquared = d0;
+            bestObserver = 0;
+          } else {
+            bestScaledDistanceSquared = d1;
+            bestObserver = 1;
+          }
+        } else if (observerCount === 3) {
+          const dx0 = itemX - observerX[0];
+          const dy0 = itemY - observerY[0];
+          const dz0 = itemZ - observerZ[0];
+          const dx1 = itemX - observerX[1];
+          const dy1 = itemY - observerY[1];
+          const dz1 = itemZ - observerZ[1];
+          const dx2 = itemX - observerX[2];
+          const dy2 = itemY - observerY[2];
+          const dz2 = itemZ - observerZ[2];
+          bestScaledDistanceSquared = (dx0 * dx0 + dy0 * dy0 + dz0 * dz0) / observerQualityScale[0];
+          bestObserver = 0;
+          const d1 = (dx1 * dx1 + dy1 * dy1 + dz1 * dz1) / observerQualityScale[1];
+          if (d1 < bestScaledDistanceSquared) {
+            bestScaledDistanceSquared = d1;
+            bestObserver = 1;
+          }
+          const d2 = (dx2 * dx2 + dy2 * dy2 + dz2 * dz2) / observerQualityScale[2];
+          if (d2 < bestScaledDistanceSquared) {
+            bestScaledDistanceSquared = d2;
+            bestObserver = 2;
+          }
+        } else if (observerCount === 4) {
+          const dx0 = itemX - observerX[0];
+          const dy0 = itemY - observerY[0];
+          const dz0 = itemZ - observerZ[0];
+          const dx1 = itemX - observerX[1];
+          const dy1 = itemY - observerY[1];
+          const dz1 = itemZ - observerZ[1];
+          const dx2 = itemX - observerX[2];
+          const dy2 = itemY - observerY[2];
+          const dz2 = itemZ - observerZ[2];
+          const dx3 = itemX - observerX[3];
+          const dy3 = itemY - observerY[3];
+          const dz3 = itemZ - observerZ[3];
+          bestScaledDistanceSquared = (dx0 * dx0 + dy0 * dy0 + dz0 * dz0) / observerQualityScale[0];
+          bestObserver = 0;
+          const d1 = (dx1 * dx1 + dy1 * dy1 + dz1 * dz1) / observerQualityScale[1];
+          if (d1 < bestScaledDistanceSquared) {
+            bestScaledDistanceSquared = d1;
+            bestObserver = 1;
+          }
+          const d2 = (dx2 * dx2 + dy2 * dy2 + dz2 * dz2) / observerQualityScale[2];
+          if (d2 < bestScaledDistanceSquared) {
+            bestScaledDistanceSquared = d2;
+            bestObserver = 2;
+          }
+          const d3 = (dx3 * dx3 + dy3 * dy3 + dz3 * dz3) / observerQualityScale[3];
+          if (d3 < bestScaledDistanceSquared) {
+            bestScaledDistanceSquared = d3;
+            bestObserver = 3;
+          }
+        } else {
+          bestScaledDistanceSquared = Number.POSITIVE_INFINITY;
+          for (let observerIndex = 0; observerIndex < observerCount; observerIndex++) {
+            const dx = itemX - observerX[observerIndex];
+            const dy = itemY - observerY[observerIndex];
+            const dz = itemZ - observerZ[observerIndex];
+            const scaledDistanceSquared = (dx * dx + dy * dy + dz * dz) / observerQualityScale[observerIndex];
+            if (scaledDistanceSquared < bestScaledDistanceSquared) {
+              bestScaledDistanceSquared = scaledDistanceSquared;
+              bestObserver = observerIndex;
+            }
+          }
+        }
+        const profile = singleProfile ?? compiledProfiles[itemProfileIndexes[index]];
+        const maxDistanceSquares = profile.maxDistanceSquares;
+        level = profile.count - 1;
+        for (let levelIndex = 0; levelIndex < profile.count; levelIndex++) {
+          if (bestScaledDistanceSquared <= maxDistanceSquares[levelIndex]) {
+            level = levelIndex;
+            break;
+          }
+        }
+        isVisible = level !== NO_LEVEL && profile.visible[level] === 1;
+      }
+      const previousLevel = lastLevels[index];
+      const previousVisible = lastVisible[index] === 1;
+      if (previousLevel !== level || previousVisible !== isVisible) frame.changedIndexes[frame.changedIndexes.length] = index;
+      levels[index] = level;
+      visible[index] = isVisible ? 1 : 0;
+      observerIndexes[index] = bestObserver;
+      lastLevels[index] = level;
+      lastVisible[index] = isVisible ? 1 : 0;
+      if (isVisible) frame.visibleCount++;
+    }
+    return frame;
+  }
+
   createWorkPlan(frame: FrontierLodFrame, options: FrontierLodWorkPlanOptions = {}): FrontierLodWorkPlan {
     return createLodWorkPlan(frame, options);
   }
@@ -899,6 +1089,14 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
     this.bucketNext = new Int32Array(size);
     this.lastLevels.fill(NO_LEVEL);
     for (let i = 0; i < size; i++) this.updateItemCache(i);
+  }
+
+  private ensureObserverScratch(size: number): void {
+    if (this.observerX.length >= size) return;
+    this.observerX = new Float64Array(size);
+    this.observerY = new Float64Array(size);
+    this.observerZ = new Float64Array(size);
+    this.observerQualityScale = new Float64Array(size);
   }
 
   private updateItemCache(index: number): void {
@@ -955,6 +1153,17 @@ function ensureTransitionFrame(target: FrontierLodTransitionFrame | undefined, s
     frame.levels = new Int16Array(size);
     frame.previousVisible = new Uint8Array(size);
     frame.visible = new Uint8Array(size);
+  }
+  return frame;
+}
+
+function ensureMultiObserverFrame(target: FrontierLodMultiObserverFrame | undefined, size: number): FrontierLodMultiObserverFrame {
+  const frame = target ?? createLodMultiObserverFrame(size);
+  if (frame.levels.length < size) {
+    frame.levels = new Int16Array(size);
+    frame.visible = new Uint8Array(size);
+    frame.observerIndexes = new Int32Array(size);
+    frame.observerIndexes.fill(-1);
   }
   return frame;
 }
