@@ -2,6 +2,7 @@ import {
   createLodBandFrame,
   createLodCompactFrame,
   createLodEngine,
+  createLodTransitionFrame,
   createLodWorkPlan,
   lodItem,
   lodLevel,
@@ -16,6 +17,7 @@ import {
   type FrontierLodFrame,
   type FrontierLodMaterialization,
   type FrontierLodSnapshot,
+  type FrontierLodTransitionFrame,
   type FrontierLodWorkPlan
 } from '../dist/index.js';
 
@@ -38,6 +40,7 @@ engine.commit(setLodItemEnabledPatch(0, true));
 const frame: FrontierLodFrame = engine.evaluate({ x: 0, y: 0 }, { includeHidden: true });
 const compactFrame: FrontierLodCompactFrame = engine.evaluateInto(createLodCompactFrame(1), { x: 0, y: 0 });
 const bandFrame: FrontierLodBandFrame = engine.evaluateBandsInto(createLodBandFrame(1), { x: 0, y: 0 });
+const transitionFrame: FrontierLodTransitionFrame = engine.evaluateBandTransitionsInto(createLodTransitionFrame(1), { x: 0, y: 0 });
 const assignments: FrontierLodAssignment[] = engine.assignments(frame);
 const workPlan: FrontierLodWorkPlan = createLodWorkPlan(frame, { nowMs: 1 });
 const materialization: FrontierLodMaterialization = materializeLodFrame(frame);
@@ -51,4 +54,5 @@ scheduleLodWork({
 void assignments;
 void compactFrame;
 void bandFrame;
+void transitionFrame;
 void materialization;

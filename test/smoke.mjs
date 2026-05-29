@@ -1,6 +1,7 @@
 import assert from 'node:assert';
 import {
   createLodEngine,
+  createLodTransitionFrame,
   createLodWorkPlan,
   lodItem,
   lodLevel,
@@ -44,6 +45,21 @@ const bands = engine.evaluateBandsInto(undefined, { x: 0, y: 0 });
 assert.strictEqual(bands.kind, 'frontier.lod.band-frame');
 assert.strictEqual(bands.visibleCount, 2);
 assert.strictEqual(bands.levels[2], 3);
+
+const transitionEngine = createLodEngine({
+  profiles: [profile],
+  items: [
+    lodItem('a', 0, 0, { profile: 'npc', radius: 2, priority: 2 }),
+    lodItem('b', 40, 0, { profile: 'npc', radius: 1 }),
+    lodItem('c', 300, 0, { profile: 'npc', radius: 1 })
+  ]
+});
+const transitions = transitionEngine.evaluateBandTransitionsInto(createLodTransitionFrame(3), { x: 0, y: 0 });
+assert.strictEqual(transitions.kind, 'frontier.lod.transition-frame');
+assert.strictEqual(transitions.visibleCount, bands.visibleCount);
+assert.deepStrictEqual(Array.from(transitions.indexes.slice(0, transitions.transitionCount)), [0, 1, 2]);
+const stableTransitions = transitionEngine.evaluateBandTransitionsInto(transitions, { x: 0, y: 0 });
+assert.strictEqual(stableTransitions.transitionCount, 0);
 
 const assignments = engine.assignments(frame);
 assert.strictEqual(assignments[0].id, 'a');

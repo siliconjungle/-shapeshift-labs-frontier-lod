@@ -1,6 +1,7 @@
 import assert from 'node:assert';
 import {
   createLodEngine,
+  createLodTransitionFrame,
   lodItem,
   lodLevel,
   lodProfile,
@@ -26,6 +27,7 @@ for (let i = 0; i < cases; i++) {
     });
   }
   const engine = createLodEngine({ profiles: [profile], items });
+  const transitionEngine = createLodEngine({ profiles: [profile], items });
   const frame = engine.evaluate({
     x: randRange(-50, 50),
     y: randRange(-50, 50),
@@ -49,6 +51,24 @@ for (let i = 0; i < cases; i++) {
     assert.ok(frame.distances[j] >= 0);
     assert.ok(frame.screenCoverages[j] >= 0 && frame.screenCoverages[j] <= 1);
   }
+
+  const observer = {
+    x: randRange(-50, 50),
+    y: randRange(-50, 50),
+    z: randRange(-10, 10)
+  };
+  const band = engine.evaluateBandsInto(undefined, observer);
+  const transitions = transitionEngine.evaluateBandTransitionsInto(createLodTransitionFrame(itemCount), observer);
+  assert.strictEqual(transitions.visibleCount, band.visibleCount);
+  assert.ok(transitions.transitionCount <= itemCount);
+  for (let j = 0; j < transitions.transitionCount; j++) {
+    assert.ok(transitions.indexes[j] >= 0 && transitions.indexes[j] < itemCount);
+    assert.ok(transitions.levels[j] >= -1 && transitions.levels[j] < levelCount);
+    assert.ok(transitions.previousLevels[j] >= -1 && transitions.previousLevels[j] < levelCount);
+    assert.ok(transitions.visible[j] === 0 || transitions.visible[j] === 1);
+    assert.ok(transitions.previousVisible[j] === 0 || transitions.previousVisible[j] === 1);
+  }
+  assert.strictEqual(transitionEngine.evaluateBandTransitionsInto(transitions, observer).transitionCount, 0);
 
   const patchIndex = randInt(0, itemCount - 1);
   const nextX = randRange(-100, 100);

@@ -6,6 +6,7 @@ import {
   createLodBandFrame,
   createLodCompactFrame,
   createLodEngine,
+  createLodTransitionFrame,
   createLodWorkPlan,
   lodItem,
   lodLevel,
@@ -37,11 +38,16 @@ let cursor = 0;
 let cachedFrame = engine.evaluate(observer);
 let bandFrame = createLodBandFrame(count);
 let compactFrame = createLodCompactFrame(count);
+let transitionFrame = createLodTransitionFrame(count);
 
 const rows = [
   measure('evaluate-bands-distance-' + count, () => {
     bandFrame = engine.evaluateBandsInto(bandFrame, observer);
     return bandFrame.visibleCount;
+  }),
+  measure('evaluate-band-transitions-static-' + count, () => {
+    transitionFrame = engine.evaluateBandTransitionsInto(transitionFrame, observer);
+    return transitionFrame.visibleCount + transitionFrame.transitionCount;
   }),
   measure('evaluate-compact-distance-' + count, () => {
     compactFrame = engine.evaluateInto(compactFrame, observer, { mode: 'distance' });

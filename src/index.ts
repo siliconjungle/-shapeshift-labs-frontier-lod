@@ -141,6 +141,20 @@ export interface FrontierLodBandFrame {
   changedIndexes: number[];
 }
 
+export interface FrontierLodTransitionFrame {
+  kind: 'frontier.lod.transition-frame';
+  version: 1;
+  generation: number;
+  itemCount: number;
+  transitionCount: number;
+  visibleCount: number;
+  indexes: Int32Array;
+  previousLevels: Int16Array;
+  levels: Int16Array;
+  previousVisible: Uint8Array;
+  visible: Uint8Array;
+}
+
 export interface FrontierLodAssignment {
   id: string;
   index: number;
@@ -238,6 +252,7 @@ export interface FrontierLodEngine {
   evaluate(observer: FrontierLodObserver, options?: FrontierLodEvaluateOptions): FrontierLodFrame;
   evaluateInto(target: FrontierLodCompactFrame | undefined, observer: FrontierLodObserver, options?: FrontierLodEvaluateOptions): FrontierLodCompactFrame;
   evaluateBandsInto(target: FrontierLodBandFrame | undefined, observer: FrontierLodObserver): FrontierLodBandFrame;
+  evaluateBandTransitionsInto(target: FrontierLodTransitionFrame | undefined, observer: FrontierLodObserver): FrontierLodTransitionFrame;
   assignments(frame: FrontierLodFrame): FrontierLodAssignment[];
   createWorkPlan(frame: FrontierLodFrame, options?: FrontierLodWorkPlanOptions): FrontierLodWorkPlan;
 }
@@ -275,6 +290,23 @@ export function createLodBandFrame(capacity = 0): FrontierLodBandFrame {
     visible: new Uint8Array(size),
     visibleCount: 0,
     changedIndexes: []
+  };
+}
+
+export function createLodTransitionFrame(capacity = 0): FrontierLodTransitionFrame {
+  const size = Math.max(0, Math.floor(capacity));
+  return {
+    kind: 'frontier.lod.transition-frame',
+    version: 1,
+    generation: 0,
+    itemCount: 0,
+    transitionCount: 0,
+    visibleCount: 0,
+    indexes: new Int32Array(size),
+    previousLevels: new Int16Array(size),
+    levels: new Int16Array(size),
+    previousVisible: new Uint8Array(size),
+    visible: new Uint8Array(size)
   };
 }
 
@@ -793,6 +825,54 @@ class FrontierLodEngineImpl implements FrontierLodEngine {
     return frame;
   }
 
+  evaluateBandTransitionsInto(target: FrontierLodTransitionFrame | undefined, observer: FrontierLodObserver): FrontierLodTransitionFrame {
+    const normalizedObserver = normalizeObserver(observer);
+    const frame = ensureTransitionFrame(target, this.state.items.length);
+    frame.generation = this.generationValue;
+    frame.itemCount = this.state.items.length;
+    frame.transitionCount = 0;
+    frame.visibleCount = 0;
+    const eyeX = normalizedObserver.x;
+    const eyeY = normalizedObserver.y;
+    const eyeZ = normalizedObserver.z ?? 0;
+    const qualityBias = Math.max(EPSILON, normalizedObserver.qualityBias ?? 1);
+    const qualityScale = qualityBias * qualityBias;
+    for (let index = 0; index < this.state.items.length; index++) {
+      let level = NO_LEVEL;
+      let isVisible = false;
+      if (this.enabled[index] !== 0) {
+        const profile = this.compiledProfiles[this.itemProfileIndexes[index]];
+        const dx = this.x[index] - eyeX;
+        const dy = this.y[index] - eyeY;
+        const dz = this.z[index] - eyeZ;
+        const distanceSquared = dx * dx + dy * dy + dz * dz;
+        const maxDistanceSquares = profile.maxDistanceSquares;
+        level = profile.count - 1;
+        for (let levelIndex = 0; levelIndex < profile.count; levelIndex++) {
+          if (distanceSquared <= maxDistanceSquares[levelIndex] * qualityScale) {
+            level = levelIndex;
+            break;
+          }
+        }
+        isVisible = level !== NO_LEVEL && profile.visible[level] === 1;
+      }
+      const previousLevel = this.lastLevels[index];
+      const wasVisible = this.lastVisible[index] === 1;
+      if (previousLevel !== level || wasVisible !== isVisible) {
+        const position = frame.transitionCount++;
+        frame.indexes[position] = index;
+        frame.previousLevels[position] = previousLevel;
+        frame.levels[position] = level;
+        frame.previousVisible[position] = wasVisible ? 1 : 0;
+        frame.visible[position] = isVisible ? 1 : 0;
+      }
+      this.lastLevels[index] = level;
+      this.lastVisible[index] = isVisible ? 1 : 0;
+      if (isVisible) frame.visibleCount++;
+    }
+    return frame;
+  }
+
   createWorkPlan(frame: FrontierLodFrame, options: FrontierLodWorkPlanOptions = {}): FrontierLodWorkPlan {
     return createLodWorkPlan(frame, options);
   }
@@ -862,6 +942,18 @@ function ensureBandFrame(target: FrontierLodBandFrame | undefined, size: number)
   const frame = target ?? createLodBandFrame(size);
   if (frame.levels.length < size) {
     frame.levels = new Int16Array(size);
+    frame.visible = new Uint8Array(size);
+  }
+  return frame;
+}
+
+function ensureTransitionFrame(target: FrontierLodTransitionFrame | undefined, size: number): FrontierLodTransitionFrame {
+  const frame = target ?? createLodTransitionFrame(size);
+  if (frame.indexes.length < size) {
+    frame.indexes = new Int32Array(size);
+    frame.previousLevels = new Int16Array(size);
+    frame.levels = new Int16Array(size);
+    frame.previousVisible = new Uint8Array(size);
     frame.visible = new Uint8Array(size);
   }
   return frame;
